@@ -302,6 +302,97 @@ function useBibleDatabase() {
   }
 }
 
+function useScrollPreservation() {
+  const scrollPosition = Vue.ref({ top: 0, element: null, anchorElement: null })
+  
+  const captureScrollPosition = (container) => {
+    if (!container) {
+      container = document.querySelector('[data-scroll-container="true"]')
+    }
+    
+    if (container) {
+      // Find the first visible verse element as an anchor
+      const visibleVerses = container.querySelectorAll('[data-chapter][data-verse]')
+      let anchorElement = null
+      
+      for (const verse of visibleVerses) {
+        const rect = verse.getBoundingClientRect()
+        const containerRect = container.getBoundingClientRect()
+        
+        if (rect.top >= containerRect.top && rect.top <= containerRect.bottom) {
+          anchorElement = verse
+          break
+        }
+      }
+      
+      scrollPosition.value = {
+        top: container.scrollTop,
+        element: container,
+        anchorElement: anchorElement,
+        anchorId: anchorElement ? `${anchorElement.dataset.chapter}-${anchorElement.dataset.verse}` : null
+      }
+      console.log('Captured scroll position:', scrollPosition.value.top, 'anchor:', scrollPosition.value.anchorId)
+    }
+  }
+  
+  const restoreScrollPosition = (container, heightDiff = 0) => {
+    if (!container) {
+      container = document.querySelector('[data-scroll-container="true"]')
+    }
+    
+    if (container && scrollPosition.value.element === container) {
+      // Try to find the anchor element first
+      if (scrollPosition.value.anchorId) {
+        const [chapter, verse] = scrollPosition.value.anchorId.split('-')
+        const anchorElement = container.querySelector(`[data-chapter="${chapter}"][data-verse="${verse}"]`)
+        
+        if (anchorElement) {
+          anchorElement.scrollIntoView({ block: 'start', behavior: 'auto' })
+          console.log('Restored scroll position using anchor:', scrollPosition.value.anchorId)
+          return
+        }
+      }
+      
+      // Fallback to scroll top adjustment
+      const newScrollTop = scrollPosition.value.top + heightDiff
+      container.scrollTop = newScrollTop
+      console.log('Restored scroll position using top:', newScrollTop, 'heightDiff:', heightDiff)
+    }
+  }
+  
+  const preserveScrollDuringUpdate = async (container, updateCallback, direction = 'forward') => {
+    if (!container) {
+      container = document.querySelector('[data-scroll-container="true"]')
+    }
+    
+    if (!container) return await updateCallback()
+    
+    const oldScrollHeight = container.scrollHeight
+    
+    captureScrollPosition(container)
+    
+    await updateCallback()
+    
+    // Use a longer delay to ensure DOM is fully updated
+    await new Promise(resolve => setTimeout(resolve, 50))
+    
+    Vue.nextTick(() => {
+      if (direction === 'backward') {
+        const newScrollHeight = container.scrollHeight
+        const heightDiff = newScrollHeight - oldScrollHeight
+        restoreScrollPosition(container, heightDiff)
+      }
+    })
+  }
+  
+  return {
+    scrollPosition,
+    captureScrollPosition,
+    restoreScrollPosition,
+    preserveScrollDuringUpdate
+  }
+}
+
 function useScrollManager(database) {
   const smartScrollTo = (searchInput) => {
     try {
@@ -440,6 +531,7 @@ setTimeout(function() {
      const tabManager = useTabManager()
      const verseTracking = useVerseTracking()
      const database = useBibleDatabase()
+     const scrollPreservation = useScrollPreservation()
      const scrollManager = useScrollManager(database)
      
      // Bible search composable logic
@@ -688,19 +780,34 @@ setTimeout(function() {
            
            console.log(`Loading ${direction} chapter: ${targetBook} ${targetChapter}`)
            
-           const newVerses = await database.loadSingleChapter(targetBook, targetChapter)
-           if (newVerses.length > 0) {
-             const tab = tabManager.activeTab.value
-             tab.allVerses = [...tab.allVerses, ...newVerses]
-             
-             Vue.nextTick(() => {
-               verseTracking.setupVerseTracking(
-                 tab, 
-                 updateSearchInputFromPosition, 
-                 checkForAdjacentChapterLoading
-               )
-             })
-           }
+           const scrollContainer = document.querySelector('[data-scroll-container="true"]')
+           
+           await scrollPreservation.preserveScrollDuringUpdate(
+             scrollContainer,
+             async () => {
+               const newVerses = await database.loadSingleChapter(targetBook, targetChapter)
+               if (newVerses.length > 0) {
+                 const tab = tabManager.activeTab.value
+                 
+                 if (direction === 'backward') {
+                   // Add to beginning for backward loading
+                   tab.allVerses = [...newVerses, ...tab.allVerses]
+                 } else {
+                   // Add to end for forward loading
+                   tab.allVerses = [...tab.allVerses, ...newVerses]
+                 }
+               }
+             },
+             direction
+           )
+           
+           Vue.nextTick(() => {
+             verseTracking.setupVerseTracking(
+               tabManager.activeTab.value, 
+               updateSearchInputFromPosition, 
+               checkForAdjacentChapterLoading
+             )
+           })
            
            verseTracking.loadedChapters.value.add(chapterKey)
          }
