@@ -1,4 +1,4 @@
-// Composables
+// Composables 2.0
 function useTabManager() {
   const tabs = Vue.ref([
     {
